@@ -1,0 +1,386 @@
+---
+title: "Machine Learning (ML) Bioinformatics Workshop – Hands-on application of ML on drug response prediction data using R"
+author: "Nestoras Karathanasis"
+date: "2025-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Tutorial Description
+
+In this 4-hour hands-on tutorial, we will explore the application of machine learning techniques for drug response prediction using R. The session is designed for Master’s and PhD students in bioinformatics who want to deepen their understanding of ML workflows and tools in R. We will use the powerful `caret` package for building, training, evaluating and interpreting classification models. Additionally, we will introduce the `h2o` package for scalable modeling and touch upon integrating interactive visualizations using Shiny.
+
+Participants will work with the [BeatAML](https://www.nature.com/articles/s41586-018-0623-z#Sec38) dataset published in Nature 2018, and available in the supplementary material of the paper. BeatAML is a rich pharmacogenomic resource derived from primary samples of acute myeloid leukemia (AML) patients.
+
+This dataset includes:
+
+-   RNA-seq gene expression profiles (RPKM, CPM)
+
+-   Drug response measurements (e.g. IC50, AUC)
+
+-   Clinical annotations
+
+-   Variants
+
+By the end of the tutorial, participants will:
+
+-   Understand data pre-processing steps for transcriptomics data
+
+-   Train multiple ML models (Elastic Net, KNN, Random Forest, Gradient Boosting Machines, Support Vector Machines) using `caret`
+
+-   Evaluate model performance using cross-validation and test sets and several metrics (Confusion matrices, Accuracy, Area Under the ROC curve, etc)
+
+-   Identify important features
+
+-   Explore deep learning and AutoML using `h2o`
+
+At the end of the tutorial, participants will be given a **mini-competition assignment** to apply what they've learned. The team with the best-performing solution will have the opportunity to present their results during the closing session of the conference.
+
+## Software and data requirements
+
+To fully participate in this hands-on tutorial, please ensure the following software and packages are installed before the session begins:
+
+1.  R and RStudio (latest versions)
+
+2.  Required R Packages You can install all required packages using the command below:
+
+```{r}
+packages <- c("data.table", "caret", "ggplot2", "pROC", "doParallel", 
+              "magrittr", "h2o", "e1071", "randomForest", "gbm", 
+              "glmnet", "kernlab")
+install.packages(packages)
+```
+
+3.  System Requirements
+
+    A machine with at least 8 GB RAM
+
+    Multicore CPU recommended for parallel processing
+
+    Stable internet connection (for downloading packages or data, if needed)
+
+4.  Dataset
+
+    Please download the BeatAML dataset (from the supplementary materials of the [original publication](https://www.nature.com/articles/s41586-018-0623-z#Sec38)).
+
+# Load the data
+
+Data were exported to .csv files before running the steps below.
+
+## Read and organize the CPM RNAseq expression data
+
+```{r, echo=FALSE}
+library(data.table)
+library(magrittr)
+
+# Read file ####
+cpm <- fread(file = "../datasets/beataml/Gene_Counts_CPM.csv", check.names = TRUE)
+cpm_mat <- as.matrix(cpm[, -c(1, 2)])
+rownames(cpm_mat) <- cpm$Gene
+
+# Transpose ####
+cpm_mat <- t(cpm_mat)
+
+# Convert to data.table
+cpm_preprocess <- data.table(cpm_mat, keep.rownames = TRUE)
+colnames(cpm_preprocess)[1] <- "labid"
+```
+
+## Read and organize the Drug Response data
+
+```{r, echo=FALSE}
+# Read file ####
+drug_response <- fread(file = "../datasets/beataml/Drug_Responses.csv")
+drug_response$inhibitor <- make.names(drug_response$inhibitor)
+drug_response$lab_id <- make.names(drug_response$lab_id)
+colnames(drug_response)[2] <- "labid"
+
+cat("In total we have", length(unique(drug_response[,inhibitor])), "drugs")
+```
+
+## Select drug to predict its response and formulate the problem
+
+In the data there are four drugs that are used in clinical practice Gilteritinib, Lenalidomide, Midostaurin, and Venetoclax. We will use **Venetoclax** as an example. We will convert the problem to a classification. For educational purposes, we use the median AUC value to define drug response classes (Sensitive, Resistant).
+
+```{r}
+# Number of samples per drug
+drug_response[
+    inhibitor %in% c("Venetoclax", "Midostaurin",
+                     "Gilteritinib..ASP.2215.",
+                     "Lenalidomide"
+                     ),inhibitor] %>% 
+    table() %>% sort(decreasing = TRUE)
+
+# Select drug
+drug_j <- "Venetoclax"
+drug_response_j <- drug_response[inhibitor == drug_j, c("labid", "auc")]
+
+# Convert the problem to a classification. For educational purposes, we use the median AUC value to define drug response classes.
+drug_response_j[
+    , auc_binary := ifelse(test = auc <= median(drug_response_j[, auc]), 
+                           yes = "Sensitive", 
+                           no = "Resistant"
+                           )
+    ]
+
+# Merge data
+data_all <- merge.data.table(
+    x = drug_response_j[, c("labid", "auc_binary")], 
+    y = cpm_preprocess, 
+    by = "labid")
+
+head(data_all)[, 1:4]
+```
+
+# Model training
+
+## Create train/test split
+
+We will keep 70% of the data for training and 30% for testing. Train and test data partitions will contain the same class representation distribution as the whole dataset - stratified data splitting - **TODO**.
+
+```{r, echo=FALSE}
+library(caret)
+
+# Create X and y
+X <- as.matrix(data_all[, -c("labid", "auc_binary")])
+y <- data_all[, auc_binary]
+
+# Split the data in train test
+set.seed(42)
+trainIndex <- createDataPartition(y, p = 0.7, list = FALSE)
+X_train <- X[trainIndex, ]
+X_test  <- X[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test  <- y[-trainIndex] %>% as.factor()
+```
+
+## Feature selection on training set (optionally)
+
+We retain the top 500 most variable genes across samples, assuming they carry the most discriminative signal for drug response.
+
+```{r}
+gene_sd <- apply(X = X_train, MARGIN = 2, FUN = sd)
+hist(gene_sd, xlab = "Genes standard deviation")
+genes2keep <- sort(x = gene_sd, decreasing = TRUE)[1:500]
+X_train <- X_train[, genes2keep]
+X_test <- X_test[, genes2keep]
+```
+
+## Train Machine Learning models using caret
+
+**TODO** - explain why we selected to train these models!!!
+
+```{r, echo=FALSE}
+
+library(doParallel)
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+# Define training control and pre-processing
+ctrl <- trainControl(
+    method = "cv",
+    number = 5, # 5-fold cross-validation
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary
+)
+
+# Center and scale
+preproc <- c("center", "scale")
+
+# Train models
+models2train <- c(
+    "glmnet", # Elastic Net (glmnet)
+    "knn", # KNN
+    "rf", # Random forest
+    "gbm", # Gradient Boosted Machines
+    "svmRadial" # Support vector machines with radial kernel
+    )
+
+all_models <- vector(mode = "list", length = length(models2train))
+counter <- 1
+for (modeli in models2train){
+    cat("Training model:", modeli, "\n")
+    modeli <- train(
+        x = X_train,
+        y = y_train,
+        method = modeli,
+        trControl = ctrl,
+        preProcess = preproc,
+        tuneLength = 3, 
+        metric = "ROC"
+    )
+    all_models[[counter]] <- modeli
+    counter <- counter + 1
+}
+names(all_models) <- models2train
+
+stopCluster(cl)
+
+```
+
+## Plot the Resampling Profile
+
+```{r}
+for (i in seq_len(length(all_models))){
+    trellis.par.set(caretTheme())
+    print(plot(all_models[[i]], main = names(all_models)[i]))
+}
+```
+
+# Model selection
+
+## Model Comparison on the Cross Validation(CV) results
+
+```{r}
+resamps <- resamples(all_models)
+summary(resamps)
+
+theme1 <- trellis.par.get()
+theme1$plot.symbol$col = rgb(.2, .2, .2, .4)
+theme1$plot.symbol$pch = 16
+theme1$plot.line$col = rgb(1, 0, 0, .7)
+theme1$plot.line$lwd <- 2
+trellis.par.set(theme1)
+bwplot(resamps, layout = c(3, 1))
+```
+
+## Evaluate statistical significance of differences
+
+```{r}
+# Evaluate statistical significance of differences
+trellis.par.set(caretTheme())
+dotplot(resamps, metric = "ROC")
+difValues <- diff(resamps)
+difValues
+summary(difValues)
+trellis.par.set(theme1)
+bwplot(difValues, layout = c(3, 1))
+
+```
+
+# Evaluate models on test set
+
+We will use confusion matrices, classification reports and the Area Under the ROC curve to evaluate the performance of our models to the test set.
+
+## Confusion matrices and classification reports
+
+```{r}
+for (i in 1:length(all_models)) {
+    preds <- predict(all_models[[i]], X_test)
+    cat("\nModel:", names(all_models)[i], "\n")
+    print(confusionMatrix(preds, y_test))
+}
+
+```
+
+## Area Under the ROC curve (AUC)
+
+```{r, echo=FALSE}
+
+library(ggplot2)
+library(pROC)
+
+# Calculate ROCs and AUCs on test data
+roc_list <- lapply(names(all_models), function(name) {
+  probs <- predict(all_models[[name]], X_test, type = "prob")[, "Sensitive"]
+  roc_obj <- roc(y_test, probs)
+  auc_val <- auc(roc_obj)
+  return(roc_obj)
+})
+aucs_holdout <- sapply(roc_list, auc)
+
+names(roc_list) <- paste0(models2train, " (AUC = ", round(aucs_holdout, 3), ")")
+ggroc(roc_list) + theme_minimal()
+
+```
+
+# Variable Importance of the best model
+
+```{r}
+plot(varImp(model_rf), top = 20, 
+     main = "Variable importance")
+```
+
+# H2O’s AutoML
+
+H2O AutoML can take time depending on dataset size. For tutorial purposes, we limit the number of models to 5. - **TODO** explain what is AutoML
+
+## Training h2o AutoML
+
+```{r}
+library(h2o)
+h2o.init()
+
+train_h2o <- as.h2o(data.frame(X_train, auc_binary = as.factor(y_train)))
+test_h2o  <- as.h2o(data.frame(X_test, auc_binary = as.factor(y_test)))
+
+
+
+aml <- h2o.automl(
+    x = colnames(X_train),
+    y = "auc_binary",
+    training_frame = train_h2o,
+    max_models = 5,
+    seed = 42
+)
+
+lb <- aml@leaderboard
+print(lb)
+```
+
+## Make predictions
+
+```{r}
+# To generate predictions on a test set, you can make predictions
+# directly on the `H2OAutoML` object or on the leader model
+# object directly
+pred <- h2o.predict(aml, test_h2o)  # predict(aml, test) also works
+pred
+```
+
+## Evaluate performance on test data
+
+```{r}
+h2o.performance(model = aml@leader, newdata = test_h2o)
+```
+
+## Models explainability
+
+Explain leader model & compare with all AutoML models
+
+```{r}
+exa <- h2o.explain(aml, test_h2o)
+exa
+
+```
+
+Explain a single H2O model (e.g. leader model from AutoML)
+
+```{r}
+# Select model to explain
+model2explain <- h2o.getModel("DRF_1_AutoML_1_20250425_142808")
+
+exm <- h2o.explain(model2explain, test_h2o)
+exm
+
+```
+
+# Conclusion
+
+In this tutorial, we explored how to:
+
+-   Prepare transcriptomic and drug response data
+-   Train and evaluate classification models using `caret`
+-   Compare models using cross-validation
+-   Explore AutoML capabilities with `h2o`
+
+Participants are encouraged to experiment with:
+
+-   More drugs from the BeatAML dataset
+-   Additional pre-processing steps (e.g., PCA)
+-   Integration of mutation/variant data
+
+Happy modeling!!
