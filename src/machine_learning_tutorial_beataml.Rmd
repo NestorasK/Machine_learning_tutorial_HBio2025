@@ -48,10 +48,10 @@ To fully participate in this hands-on tutorial, please ensure the following soft
 2.  Required R Packages You can install all required packages using the command below:
 
 ```{r}
-packages <- c("data.table", "caret", "ggplot2", "pROC", "doParallel", 
-              "magrittr", "h2o", "e1071", "randomForest", "gbm", 
-              "glmnet", "kernlab")
-install.packages(packages)
+# packages <- c("data.table", "caret", "ggplot2", "pROC", "doParallel", 
+#               "magrittr", "h2o", "e1071", "randomForest", "gbm", 
+#               "glmnet", "kernlab")
+# install.packages(packages)
 ```
 
 3.  System Requirements
@@ -139,7 +139,7 @@ head(data_all)[, 1:4]
 
 ## Create train/test split
 
-We will keep 70% of the data for training and 30% for testing. Train and test data partitions will contain the same class representation distribution as the whole dataset - stratified data splitting - **TODO**.
+We will keep 70% of the data for training and 30% for testing. Train and test data partitions will contain the same class representation distribution as the whole dataset - stratified data splitting.
 
 ```{r, echo=FALSE}
 library(caret)
@@ -148,30 +148,329 @@ library(caret)
 X <- as.matrix(data_all[, -c("labid", "auc_binary")])
 y <- data_all[, auc_binary]
 
-# Split the data in train test
+# Split the data into stratified train/test sets (70/30 split)
 set.seed(42)
 trainIndex <- createDataPartition(y, p = 0.7, list = FALSE)
 X_train <- X[trainIndex, ]
 X_test  <- X[-trainIndex, ]
-y_train <- y[trainIndex]
-y_test  <- y[-trainIndex] %>% as.factor()
+y_train <- y[trainIndex] %>% factor()
+y_test  <- y[-trainIndex] %>% factor()
 ```
 
 ## Feature selection on training set (optionally)
 
-We retain the top 500 most variable genes across samples, assuming they carry the most discriminative signal for drug response.
+We retain the top 50 most variable genes across samples, assuming they carry the most discriminative signal for drug response.
 
 ```{r}
+
+# Calculate standard deviation 
 gene_sd <- apply(X = X_train, MARGIN = 2, FUN = sd)
 hist(gene_sd, xlab = "Genes standard deviation")
-genes2keep <- sort(x = gene_sd, decreasing = TRUE)[1:500]
-X_train <- X_train[, genes2keep]
-X_test <- X_test[, genes2keep]
+
+# Select genes
+genes2keep <- names(sort(x = gene_sd, decreasing = TRUE)[1:50])
+
+# Make new train and test
+X_train <- X_train[, which(colnames(X_train) %in% genes2keep)]
+X_test <- X_test[, which(colnames(X_test) %in% genes2keep)]
+
+```
+
+## Logistic Regression with GLM (no hyperparameter tuning)
+
+### Train model
+
+```{r}
+# Combine predictors and response into a single data frame
+train_df <- as.data.frame(X_train)
+train_df$Response <- ifelse(y_train == "Sensitive", 1, 0)
+
+# Fit logistic regression model
+glm_model <- glm(Response ~ ., data = train_df, family = binomial)
+
+# Summary of the model
+summary(glm_model)
+```
+
+### Evaluate performance on test set
+
+```{r}
+# Predict probabilities on test set
+test_df <- as.data.frame(X_test)
+glm_probs <- predict(glm_model, newdata = test_df, type = "response")
+
+# Convert probabilities to class predictions using 0.5 threshold
+glm_preds <- ifelse(glm_probs > 0.5, "Sensitive", "Resistant") %>% factor(levels = levels(y_test))
+
+# Evaluate performance
+confusionMatrix(glm_preds, y_test)
+
+library(pROC)
+
+# Compute ROC curve and AUC
+roc_obj <- roc(y_test, glm_probs)
+auc_val <- auc(roc_obj)
+
+# Plot ROC
+plot(roc_obj, col = "#2c3e50", lwd = 2, main = paste("ROC Curve (AUC =", round(auc_val, 3), ")"))
+```
+
+### Model interpretation
+
+```{r}
+
+# Get coefficients (excluding intercept)
+coefs <- coef(glm_model)
+coefs <- coefs[-1]  # Remove intercept
+coefs <- sort(coefs, decreasing = TRUE)  # Sort by value
+
+# Create a data.frame with absolute values for plotting
+imp_df <- data.frame(
+  Feature = names(coefs),
+  Coefficient = coefs,
+  Importance = abs(coefs)
+)
+
+# Take top N important features
+top_n <- 20
+imp_top <- head(imp_df[order(-imp_df$Importance), ], top_n)
+
+library(ggplot2)
+
+ggplot(imp_top, aes(x = reorder(Feature, Importance), y = Coefficient, 
+                    fill = Coefficient > 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() +
+    labs(title = "Top 20 Important Features (Logistic Regression)",
+         x = "Feature",
+         y = "Coefficient") +
+    scale_fill_manual(values = c("steelblue", "firebrick")) +
+    theme_minimal(base_size = 14)
+
+```
+
+## Train ElasticNet
+
+### Manually
+
+```{r}
+library(glmnet)
+set.seed(42)
+
+# Step 1: Prepare data
+y_vec <- ifelse(y_train == "Sensitive", 1, 0)
+
+# Step 2: Define folds manually to perform 5 fold cross validation
+folds <- sample(x = 1:5, size = nrow(X_train), replace = TRUE)
+
+# Step 3: Define lambda grid manually
+lambda_grid <- 10^seq(2, -4, length = 100) # from 100 to 0.0001
+
+# Step 4: Storage for results
+cv_results <- matrix(NA, nrow = length(lambda_grid), ncol = 5)
+
+# Step 5: Manual 5-fold CV
+for (i in seq_len(length.out = max(folds))) {
+    cat("Processing Fold", i, "\n")
+  
+    # Split into train/val
+    val_idx <- which(folds == i)
+    X_train_fold <- X_train[-val_idx, ]
+    y_train_fold <- y_vec[-val_idx]
+  
+    X_val_fold <- X_train[val_idx, ]
+    y_val_fold <- y_vec[val_idx]
+  
+    # Train glmnet model on training fold (all lambdas at once)
+    fold_model <- glmnet(
+        x = X_train_fold,
+        y = y_train_fold,
+        family = "binomial",
+        alpha = 1, # You can tune alpha separately too
+        lambda = lambda_grid
+    )
+  
+    # Predict on validation fold
+    preds <- predict(fold_model, newx = X_val_fold, type = "response")
+  
+    # preds: matrix of n_val_samples x n_lambda
+    # Now for each lambda, calculate accuracy (ACC)
+    
+    for (j in seq_along(lambda_grid)) {
+        pred_prob <- preds[, j]
+        # Compute simple accuracy or AUC
+        pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+        acc <- mean(pred_class == y_val_fold)
+        cv_results[j, i] <- acc
+    }
+}
+
+# Step 6: Aggregate results across folds
+mean_cv_accuracy <- rowMeans(cv_results)
+
+# Step 7: Find best lambda
+best_lambda_idx <- which.max(mean_cv_accuracy)
+best_lambda <- lambda_grid[best_lambda_idx]
+cat("Best lambda:", best_lambda, "\n")
+
+# Visualization
+library(ggplot2)
+
+df_lambda_cv <- data.frame(
+  Lambda = lambda_grid,
+  Accuracy = mean_cv_accuracy
+)
+
+ggplot(df_lambda_cv, aes(x = log(Lambda), y = Accuracy)) +
+    geom_line() +
+    geom_point() +
+    geom_vline(xintercept = log(best_lambda), color = "red", linetype = "dashed") +
+    labs(
+        title = "Manual CV: Accuracy vs log(Lambda)",
+        x = "log(Lambda)",
+        y = "CV Accuracy"
+      ) +
+    theme_minimal()
+
+
+# Step 8: Retrain final model on full training set
+final_model_manual <- glmnet(
+    x = X_train,
+    y = y_vec,
+    family = "binomial",
+    alpha = 1,
+    lambda = best_lambda
+)
+
+# Step 9: Evaluate on test set
+X_test_mat <- as.matrix(X_test)
+probs_test <- predict(final_model_manual, newx = X_test_mat, type = "response")
+pred_classes_test <- ifelse(probs_test > 0.5, "Sensitive", "Resistant") %>% as.factor()
+
+confusionMatrix(pred_classes_test, y_test)
+
+# Compute ROC curve and AUC
+roc_obj <- roc(y_test, probs_test[,1])
+auc_val <- auc(roc_obj)
+
+# Plot ROC
+plot(roc_obj, col = "#2c3e50", lwd = 2, main = paste("ROC Curve (AUC =", round(auc_val, 3), ")"))
+
+```
+
+### Model Interpretation
+
+```{r}
+# Extract and clean non-zero coefficients
+coef_matrix <- coef(final_model_manual)
+coef_df <- as.data.frame(as.matrix(coef_matrix))
+coef_df$gene <- rownames(coef_df)
+colnames(coef_df)[1] <- "coefficient"
+
+# Remove intercept and zero coefficients
+coef_df <- coef_df[coef_df$coefficient != 0 & coef_df$gene != "(Intercept)", ]
+
+# Order by coefficient magnitude
+coef_df <- coef_df[order(abs(coef_df$coefficient), decreasing = TRUE), ]
+
+# Load ggplot2 for visualization
+library(ggplot2)
+
+# Create the plot
+ggplot(coef_df, 
+       aes(x = reorder(gene, coefficient), 
+           y = coefficient, fill = coefficient > 0)) +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    coord_flip() +
+    labs(title = "Non-Zero Coefficients from Elastic Net Model",
+         x = "Gene",
+         y = "Coefficient") +
+    scale_fill_manual(values = c("firebrick", "steelblue")) +
+    theme_minimal(base_size = 14)
+
+```
+
+### Train the Elastic Net model using `cv.glmnet`
+
+```{r}
+# Train elastic net with 5-fold CV
+set.seed(42)
+cv_fit <- cv.glmnet(x = X_train,
+                    y = y_train,
+                    alpha = 1,          # Elastic net: mix between LASSO (1) and Ridge (0)
+                    family = "binomial",
+                    type.measure = "auc", # AUC for classification
+                    nfolds = 5)
+
+# View optimal lambda
+cv_fit$lambda.min
+
+# Plot CV resamples
+plot(cv_fit)
+```
+
+### Evaluate performance on test set
+
+```{r}
+# Predict probabilities on test set
+prob_test <- predict(cv_fit, newx = X_test, s = "lambda.min", type = "response")
+
+# Binary prediction
+pred_test <- ifelse(prob_test > 0.5, 1, 0)
+
+# Confusion matrix
+table(Predicted = pred_test, Actual = ifelse(y_test == "Sensitive", 1, 0))
+
+# ROC/AUC
+library(pROC)
+roc_obj <- roc(y_test, as.numeric(prob_test))
+auc(roc_obj)
+
+# Plot ROC
+plot(roc_obj, main = paste("Elastic Net AUC:", round(auc(roc_obj), 3)))
+```
+
+### Interpret the Model: Extract Non-Zero Coefficients
+
+```{r}
+# Extract non-zero coefficients at optimal lambda
+coef_enet <- coef(cv_fit, s = "lambda.min")
+coef_df <- as.data.frame(as.matrix(coef_enet))
+coef_df$gene <- rownames(coef_df)
+colnames(coef_df)[1] <- "coefficient"
+
+# Keep only non-zero and non-intercept
+coef_df <- coef_df[coef_df$coefficient != 0 & coef_df$gene != "(Intercept)", ]
+
+# Sort by magnitude
+coef_df <- coef_df[order(abs(coef_df$coefficient), decreasing = TRUE), ]
+
+# View top features
+head(coef_df, 10)
+
+ggplot(coef_df, aes(x = reorder(gene, coefficient), y = coefficient, fill = coefficient > 0)) +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    coord_flip() +
+    labs(title = "Non-Zero Coefficients from Elastic Net",
+         x = "Gene",
+         y = "Coefficient") +
+    scale_fill_manual(values = c("firebrick", "steelblue")) +
+    theme_minimal(base_size = 14)
 ```
 
 ## Train Machine Learning models using caret
 
-**TODO** - explain why we selected to train these models!!!
+We selected a diverse set of models that represent different ML families:
+
+-   Elastic Net (linear model with regularization)
+
+-   KNN (non-parametric, distance-based)
+
+-   Random Forest (ensemble of decision trees)
+
+-   GBM (boosted trees)
+
+-   SVM (Radial) (non-linear classifier for complex boundaries)
 
 ```{r, echo=FALSE}
 
@@ -268,8 +567,10 @@ We will use confusion matrices, classification reports and the Area Under the RO
 ## Confusion matrices and classification reports
 
 ```{r}
+
 for (i in 1:length(all_models)) {
     preds <- predict(all_models[[i]], X_test)
+    cat("\n##############################")
     cat("\nModel:", names(all_models)[i], "\n")
     print(confusionMatrix(preds, y_test))
 }
@@ -297,27 +598,88 @@ ggroc(roc_list) + theme_minimal()
 
 ```
 
-# Variable Importance of the best model
+# Variable Importance across models
 
 ```{r}
-plot(varImp(model_rf), top = 20, 
+# Extract variable importances
+library(gbm)
+varimps_list <- lapply(all_models, function(modeli) {
+    vi <- varImp(modeli)$importance
+    vi$Feature <- rownames(vi)
+    return(vi)
+})
+
+# Name each model
+names(varimps_list) <- models2train
+
+# Merge all into a long format
+library(data.table)
+vi_long <- rbindlist(
+    lapply(names(varimps_list), function(namei) {
+        dt <- as.data.table(varimps_list[[namei]])
+        dt[, Model := namei]
+        return(dt)
+  }),
+  use.names = TRUE, fill = TRUE
+)
+
+# For models that have multiple classes (e.g., "Sensitive", "Resistant"),
+# take the average importance across classes if necessary
+vi_long[, my_overall := ifelse(test = is.na(Overall), 
+                               yes = Resistant, 
+                               no = Overall)
+        ]
+vi_long_melted <- dcast.data.table(data = vi_long, formula = Model ~ Feature, 
+                                   value.var = "my_overall")
+
+vi_long_melted_mat <- as.matrix(vi_long_melted[, -"Model"])
+rownames(vi_long_melted_mat) <- vi_long_melted[, Model]
+
+mean_imp_all_models <- sort(
+    x = apply(
+        X = vi_long_melted_mat, 
+        MARGIN = 2, 
+        FUN = mean
+        ), 
+    decreasing = TRUE)
+
+# Plot
+number_of_genes2plot <- 20
+vi2plot_mat <- vi_long_melted_mat[, 
+    colnames(vi_long_melted_mat) %in% names(mean_imp_all_models)[1:number_of_genes2plot]]
+
+library(pheatmap)
+pheatmap(
+  mat = vi2plot_mat,
+  cluster_rows = TRUE,   # Cluster features
+  cluster_cols = TRUE,   # Cluster models
+  scale = "none",        # Do not scale the data (optional: could use "row" or "column" if needed)
+  fontsize_row = 8,
+  fontsize_col = 10,
+  treeheight_row = 50,
+  treeheight_col = 50,
+  main = "Feature Importance Across Models"
+)
+```
+
+## Variable Importance of the best model
+
+```{r}
+plot(varImp(all_models$rf), top = 20, 
      main = "Variable importance")
 ```
 
 # H2O’s AutoML
 
-H2O AutoML can take time depending on dataset size. For tutorial purposes, we limit the number of models to 5. - **TODO** explain what is AutoML
+H2O AutoML can take time depending on dataset size. For tutorial purposes, we limit the number of models to 5. AutoML (Automated Machine Learning) automates the process of training and tuning multiple models, including ensembles, to find the best-performing one with minimal manual effort.
 
 ## Training h2o AutoML
 
 ```{r}
 library(h2o)
 h2o.init()
-
 train_h2o <- as.h2o(data.frame(X_train, auc_binary = as.factor(y_train)))
 test_h2o  <- as.h2o(data.frame(X_test, auc_binary = as.factor(y_test)))
-
-
 
 aml <- h2o.automl(
     x = colnames(X_train),
@@ -361,7 +723,7 @@ Explain a single H2O model (e.g. leader model from AutoML)
 
 ```{r}
 # Select model to explain
-model2explain <- h2o.getModel("DRF_1_AutoML_1_20250425_142808")
+model2explain <- h2o.getModel("DRF_1_AutoML_2_20250428_162846")
 
 exm <- h2o.explain(model2explain, test_h2o)
 exm
