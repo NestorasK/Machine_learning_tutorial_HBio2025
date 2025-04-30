@@ -49,7 +49,7 @@ To fully participate in this hands-on tutorial, please ensure the following soft
 
 ```{r}
 # packages <- c("data.table", "caret", "ggplot2", "pROC", "doParallel", 
-#               "magrittr", "h2o", "e1071", "randomForest", "gbm", 
+#               "magrittr", "h2o", "e1071", "randomForest", "gbm", "xgboost",
 #               "glmnet", "kernlab")
 # install.packages(packages)
 ```
@@ -72,7 +72,7 @@ Data were exported to .csv files before running the steps below.
 
 ## Read and organize the CPM RNAseq expression data
 
-```{r, echo=FALSE}
+```{r}
 library(data.table)
 library(magrittr)
 
@@ -91,7 +91,7 @@ colnames(cpm_preprocess)[1] <- "labid"
 
 ## Read and organize the Drug Response data
 
-```{r, echo=FALSE}
+```{r}
 # Read file ####
 drug_response <- fread(file = "../datasets/beataml/Drug_Responses.csv")
 drug_response$inhibitor <- make.names(drug_response$inhibitor)
@@ -140,9 +140,10 @@ y <- data_all[, auc_binary]
 ```
 
 # Unsupervised learning - TODO
+
 Before proceeding with supervised model training, we explore the structure of the data using unsupervised learning techniques. These methods help uncover hidden patterns, detect outliers, and assess sample groupings without using the response variable.
 
-## Principal Component Analysis (PCA) - TODO
+## Principal Component Analysis (PCA)
 
 We apply PCA to reduce dimensionality and visualize major sources of variance in the data.
 
@@ -183,17 +184,13 @@ ggplot(pca_df, aes(PC1, PC2, color = Response)) +
 
 We apply clustering algorithms (e.g., k-means and hierarchical clustering) to discover natural groupings in the samples.
 
-
-
-
-
 # Supervised learning - Model training
 
 ## Create train/test split
 
 We will keep 70% of the data for training and 30% for testing. Train and test data partitions will contain the same class representation distribution as the whole dataset - stratified data splitting.
 
-```{r, echo=FALSE}
+```{r}
 library(caret)
 
 # Split the data into stratified train/test sets (70/30 split)
@@ -264,17 +261,54 @@ glm_preds <- ifelse(
 
 # Evaluate performance
 confusionMatrix(glm_preds, y_test)
+```
 
-library(pROC)
+Compute the ROC curve manually
 
-# Compute ROC curve and AUC
-roc_obj <- roc(y_test, glm_probs)
-auc_val <- auc(roc_obj)
+```{r}
 
-# Plot ROC
-plot(roc_obj, col = "#2c3e50", lwd = 2, 
-     main = paste("ROC Curve (AUC =", round(auc_val, 3), ")"))
+# Ground truth (0 = Resistant, 1 = Sensitive)
+actual <- ifelse(y_test == "Sensitive", 1, 0)
 
+# Predicted probabilities for "Sensitive" class
+probs <- glm_probs
+
+# Define thresholds
+thresholds <- seq(from = 0, to = 1, by = 0.01)
+
+# Initialize TPR and FPR vectors
+tpr <- rep(x = NA, length(thresholds))
+fpr <- tpr
+
+# Loop through thresholds
+for (i in seq_along(thresholds)) {
+    thresh <- thresholds[i]
+    preds <- ifelse(probs >= thresh, 1, 0)
+    
+    TP <- sum(preds == 1 & actual == 1)
+    TN <- sum(preds == 0 & actual == 0)
+    FP <- sum(preds == 1 & actual == 0)
+    FN <- sum(preds == 0 & actual == 1)
+      
+    tpr[i] <- TP / (TP + FN)
+    fpr[i] <- FP / (FP + TN)
+}
+
+# Ensure FPR and TPR are sorted in increasing FPR order
+ord <- order(fpr)
+fpr_sorted <- fpr[ord]
+tpr_sorted <- tpr[ord]
+
+# Compute AUC using the trapezoidal rule
+auc <- sum(diff(fpr_sorted) * (head(tpr_sorted, -1) + tail(tpr_sorted, -1)) / 2)
+auc
+
+# Plot ROC curve
+plot(fpr, tpr, type = "l", col = "blue", lwd = 2,
+     xlab = "False Positive Rate (1 - Specificity)",
+     ylab = "True Positive Rate (Sensitivity)",
+     main = paste("ROC Curve (AUC =", round(auc, 3), ")"))
+abline(0, 1, col = "gray", lty = 2)
 ```
 
 ### Model interpretation
@@ -413,6 +447,7 @@ pred_classes_test <- ifelse(probs_test > 0.5, "Sensitive", "Resistant") %>% as.f
 confusionMatrix(pred_classes_test, y_test)
 
 # Compute ROC curve and AUC
+library(pROC)
 roc_obj <- roc(y_test, probs_test[,1])
 auc_val <- auc(roc_obj)
 
@@ -535,7 +570,7 @@ We selected a diverse set of models that represent different ML families:
 
 -   SVM (Radial) (non-linear classifier for complex boundaries)
 
-```{r, echo=FALSE}
+```{r}
 
 library(doParallel)
 cl <- makePSOCKcluster(4)
@@ -558,6 +593,7 @@ models2train <- c(
     "knn", # KNN
     "rf", # Random forest
     "gbm", # Gradient Boosted Machines
+    "xgbTree",
     "svmRadial" # Support vector machines with radial kernel
     )
 
@@ -639,7 +675,7 @@ for (i in 1:length(all_models)) {
 
 ## Area Under the ROC curve (AUC)
 
-```{r, echo=FALSE}
+```{r}
 library(ggplot2)
 library(pROC)
 
@@ -780,9 +816,16 @@ exa
 Explain a single H2O model (e.g. leader model from AutoML)
 
 ```{r}
-# Select model to explain
-model2explain <- h2o.getModel("GLM_1_AutoML_1_20250430_110525")
+# Get the leaderboard
+lb <- aml@leaderboard
 
+# Get the ID of the second model
+second_model_id <- as.data.frame(lb$model_id)[2, 1]
+
+# Retrieve the model
+model2explain <- h2o.getModel(second_model_id)
+
+# Explain the model
 exm <- h2o.explain(model2explain, test_h2o)
 exm
 
