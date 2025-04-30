@@ -133,9 +133,61 @@ data_all <- merge.data.table(
     by = "labid")
 
 head(data_all)[, 1:4]
+
+# Create X and y
+X <- as.matrix(data_all[, -c("labid", "auc_binary")])
+y <- data_all[, auc_binary]
 ```
 
-# Model training
+# Unsupervised learning - TODO
+Before proceeding with supervised model training, we explore the structure of the data using unsupervised learning techniques. These methods help uncover hidden patterns, detect outliers, and assess sample groupings without using the response variable.
+
+## Principal Component Analysis (PCA) - TODO
+
+We apply PCA to reduce dimensionality and visualize major sources of variance in the data.
+
+```{r}
+
+# Standardize data
+X_scaled <- scale(X)
+
+# Apply PCA
+pca <- prcomp(X_scaled)
+
+# Variance explained
+explained_var <- pca$sdev^2 / sum(pca$sdev^2)
+
+# Scree plot: standard deviation of each PC
+scree_df <- data.frame(PC = 1:length(pca$sdev),
+                       VarExplained = explained_var)
+
+library(ggplot2)
+ggplot(scree_df[1:50,], aes(x = PC, y = VarExplained)) +
+    geom_line() +
+    geom_point() +
+    labs(title = "Scree Plot",
+         x = "Principal Component",
+         y = "Proportion of variable explained") +
+    theme_minimal()
+
+# Visualize first two principal components
+pca_df <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], Response = y)
+ggplot(pca_df, aes(PC1, PC2, color = Response)) +
+  geom_point() +
+  labs(title = "PCA of gene expression data") +
+  theme_minimal()
+
+```
+
+## Clustering - TODO
+
+We apply clustering algorithms (e.g., k-means and hierarchical clustering) to discover natural groupings in the samples.
+
+
+
+
+
+# Supervised learning - Model training
 
 ## Create train/test split
 
@@ -143,10 +195,6 @@ We will keep 70% of the data for training and 30% for testing. Train and test da
 
 ```{r, echo=FALSE}
 library(caret)
-
-# Create X and y
-X <- as.matrix(data_all[, -c("labid", "auc_binary")])
-y <- data_all[, auc_binary]
 
 # Split the data into stratified train/test sets (70/30 split)
 set.seed(42)
@@ -182,7 +230,17 @@ X_test <- X_test[, which(colnames(X_test) %in% genes2keep)]
 
 ```{r}
 # Combine predictors and response into a single data frame
-train_df <- as.data.frame(X_train)
+# Scale training data
+X_train_scaled <- scale(X_train)
+
+# Scale test data using training mean and sd
+X_test_scaled <- scale(X_test, 
+                       center = attr(X_train_scaled, "scaled:center"), 
+                       scale = attr(X_train_scaled, "scaled:scale"))
+
+
+# Center and scale training data
+train_df <- as.data.frame(X_train_scaled)
 train_df$Response <- ifelse(y_train == "Sensitive", 1, 0)
 
 # Fit logistic regression model
@@ -196,11 +254,13 @@ summary(glm_model)
 
 ```{r}
 # Predict probabilities on test set
-test_df <- as.data.frame(X_test)
+test_df <- as.data.frame(X_test_scaled)
 glm_probs <- predict(glm_model, newdata = test_df, type = "response")
 
 # Convert probabilities to class predictions using 0.5 threshold
-glm_preds <- ifelse(glm_probs > 0.5, "Sensitive", "Resistant") %>% factor(levels = levels(y_test))
+glm_preds <- ifelse(
+    glm_probs > 0.5, "Sensitive", "Resistant") %>% factor(
+        levels = levels(y_test))
 
 # Evaluate performance
 confusionMatrix(glm_preds, y_test)
@@ -212,7 +272,9 @@ roc_obj <- roc(y_test, glm_probs)
 auc_val <- auc(roc_obj)
 
 # Plot ROC
-plot(roc_obj, col = "#2c3e50", lwd = 2, main = paste("ROC Curve (AUC =", round(auc_val, 3), ")"))
+plot(roc_obj, col = "#2c3e50", lwd = 2, 
+     main = paste("ROC Curve (AUC =", round(auc_val, 3), ")"))
+
 ```
 
 ### Model interpretation
@@ -304,9 +366,12 @@ for (i in seq_len(length.out = max(folds))) {
         cv_results[j, i] <- acc
     }
 }
+colnames(cv_results) <- paste0("Accuracy_fold", 1:5)
+cv_results <- cbind(Lambda = lambda_grid, cv_results)
+head(cv_results)
 
 # Step 6: Aggregate results across folds
-mean_cv_accuracy <- rowMeans(cv_results)
+mean_cv_accuracy <- rowMeans(cv_results[, -1])
 
 # Step 7: Find best lambda
 best_lambda_idx <- which.max(mean_cv_accuracy)
@@ -314,8 +379,6 @@ best_lambda <- lambda_grid[best_lambda_idx]
 cat("Best lambda:", best_lambda, "\n")
 
 # Visualization
-library(ggplot2)
-
 df_lambda_cv <- data.frame(
   Lambda = lambda_grid,
   Accuracy = mean_cv_accuracy
@@ -397,7 +460,7 @@ ggplot(coef_df,
 set.seed(42)
 cv_fit <- cv.glmnet(x = X_train,
                     y = y_train,
-                    alpha = 1,          # Elastic net: mix between LASSO (1) and Ridge (0)
+                    alpha = 1, # Elastic net: mix between LASSO (1) and Ridge (0)
                     family = "binomial",
                     type.measure = "auc", # AUC for classification
                     nfolds = 5)
@@ -517,7 +580,6 @@ for (modeli in models2train){
 names(all_models) <- models2train
 
 stopCluster(cl)
-
 ```
 
 ## Plot the Resampling Profile
@@ -567,20 +629,17 @@ We will use confusion matrices, classification reports and the Area Under the RO
 ## Confusion matrices and classification reports
 
 ```{r}
-
 for (i in 1:length(all_models)) {
     preds <- predict(all_models[[i]], X_test)
     cat("\n##############################")
     cat("\nModel:", names(all_models)[i], "\n")
     print(confusionMatrix(preds, y_test))
 }
-
 ```
 
 ## Area Under the ROC curve (AUC)
 
 ```{r, echo=FALSE}
-
 library(ggplot2)
 library(pROC)
 
@@ -598,7 +657,7 @@ ggroc(roc_list) + theme_minimal()
 
 ```
 
-# Variable Importance across models
+# Model interpretation across all models
 
 ```{r}
 # Extract variable importances
@@ -613,7 +672,6 @@ varimps_list <- lapply(all_models, function(modeli) {
 names(varimps_list) <- models2train
 
 # Merge all into a long format
-library(data.table)
 vi_long <- rbindlist(
     lapply(names(varimps_list), function(namei) {
         dt <- as.data.table(varimps_list[[namei]])
@@ -650,15 +708,15 @@ vi2plot_mat <- vi_long_melted_mat[,
 
 library(pheatmap)
 pheatmap(
-  mat = vi2plot_mat,
-  cluster_rows = TRUE,   # Cluster features
-  cluster_cols = TRUE,   # Cluster models
-  scale = "none",        # Do not scale the data (optional: could use "row" or "column" if needed)
-  fontsize_row = 8,
-  fontsize_col = 10,
-  treeheight_row = 50,
-  treeheight_col = 50,
-  main = "Feature Importance Across Models"
+    mat = vi2plot_mat,
+    cluster_rows = TRUE,   # Cluster features
+    cluster_cols = TRUE,   # Cluster models
+    scale = "none", # Do not scale the data (optional: could use "row" or     "column" if needed)
+    fontsize_row = 8,
+    fontsize_col = 10,
+    treeheight_row = 50,
+    treeheight_col = 50,
+    main = "Feature Importance Across Models"
 )
 ```
 
@@ -723,7 +781,7 @@ Explain a single H2O model (e.g. leader model from AutoML)
 
 ```{r}
 # Select model to explain
-model2explain <- h2o.getModel("DRF_1_AutoML_2_20250428_162846")
+model2explain <- h2o.getModel("GLM_1_AutoML_1_20250430_110525")
 
 exm <- h2o.explain(model2explain, test_h2o)
 exm
