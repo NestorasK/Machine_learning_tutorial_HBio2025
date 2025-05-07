@@ -143,6 +143,19 @@ y <- data_all[, auc_binary]
 
 Before proceeding with supervised model training, we explore the structure of the data using unsupervised learning techniques. These methods help uncover hidden patterns, detect outliers, and assess sample groupings without using the response variable.
 
+## Get 50 most variable genes 
+
+```{r}
+# Calculate standard deviation 
+gene_sd <- apply(X = X, MARGIN = 2, FUN = sd)
+hist(gene_sd, xlab = "Genes standard deviation")
+
+# Select genes
+genes2keep <- names(sort(x = gene_sd, decreasing = TRUE)[1:50])
+X_50 <- X[, which(colnames(X) %in% genes2keep)]
+```
+
+
 ## Principal Component Analysis (PCA)
 
 We apply PCA to reduce dimensionality and visualize major sources of variance in the data.
@@ -150,7 +163,7 @@ We apply PCA to reduce dimensionality and visualize major sources of variance in
 ```{r}
 
 # Standardize data
-X_scaled <- scale(X)
+X_scaled <- scale(X_50)
 
 # Apply PCA
 pca <- prcomp(X_scaled)
@@ -163,7 +176,7 @@ scree_df <- data.frame(PC = 1:length(pca$sdev),
                        VarExplained = explained_var)
 
 library(ggplot2)
-ggplot(scree_df[1:50,], aes(x = PC, y = VarExplained)) +
+ggplot(scree_df, aes(x = PC, y = VarExplained)) +
     geom_line() +
     geom_point() +
     labs(title = "Scree Plot",
@@ -180,9 +193,63 @@ ggplot(pca_df, aes(PC1, PC2, color = Response)) +
 
 ```
 
-## Clustering - TODO
+## Clustering
 
 We apply clustering algorithms (e.g., k-means and hierarchical clustering) to discover natural groupings in the samples.
+
+### Run Kmeans clustering
+
+```{r}
+kClust <- kmeans(scale(X_50), centers=2, nstart = 1000, iter.max = 2000)
+kClusters <- as.character(kClust$cluster)
+```
+
+### Annotate and plot the clusters
+
+```{r}
+annotation_col <- data.frame(Response = y)
+rownames(annotation_col) <- data_all$labid
+rownames(X_50) = rownames(annotation_col)
+
+pca_data <- as.data.frame(pca$x[, 1:2])  # Get the first two principal components
+pca_data$Cluster <- as.factor(kClust$cluster)
+
+True_Response <- y
+#colnames(annotation_true)="Response"
+
+# Plot
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Cluster,shape = True_Response)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "K-means Clustering (k = 2) Visualized by PCA")
+
+```
+
+### Run Hierarchical clustering
+
+```{r}
+
+# Scale and transpose the data so samples are rows again (if they aren't)
+X_scaled <- scale(X_50)  # Genes as columns, samples as rows
+
+# Create annotation for pheatmap
+annotation_col <- data.frame(y)
+colnames(annotation_col)="Response"
+rownames(annotation_col) <- data_all$labid
+rownames(X_50) = rownames(annotation_col)
+library(pheatmap)
+pheatmap(t(X_scaled),                   # transpose so genes are rows, samples are columns
+         annotation_col = annotation_col,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         clustering_distance_cols = "euclidean",
+         clustering_method = "ward.D2",
+         fontsize_row = 6,
+         fontsize_col = 6,
+         fontsize = 8,
+         main = "Hierarchical Clustering")
+
+```
 
 # Supervised learning - Model training
 
@@ -207,7 +274,6 @@ y_test  <- y[-trainIndex] %>% factor()
 We retain the top 50 most variable genes across samples, assuming they carry the most discriminative signal for drug response.
 
 ```{r}
-
 # Calculate standard deviation 
 gene_sd <- apply(X = X_train, MARGIN = 2, FUN = sd)
 hist(gene_sd, xlab = "Genes standard deviation")
@@ -218,7 +284,6 @@ genes2keep <- names(sort(x = gene_sd, decreasing = TRUE)[1:50])
 # Make new train and test
 X_train <- X_train[, which(colnames(X_train) %in% genes2keep)]
 X_test <- X_test[, which(colnames(X_test) %in% genes2keep)]
-
 ```
 
 ## Logistic Regression with GLM (no hyperparameter tuning)
@@ -266,7 +331,6 @@ confusionMatrix(glm_preds, y_test)
 Compute the ROC curve manually
 
 ```{r}
-
 # Ground truth (0 = Resistant, 1 = Sensitive)
 actual <- ifelse(y_test == "Sensitive", 1, 0)
 
@@ -314,7 +378,6 @@ abline(0, 1, col = "gray", lty = 2)
 ### Model interpretation
 
 ```{r}
-
 # Get coefficients (excluding intercept)
 coefs <- coef(glm_model)
 coefs <- coefs[-1]  # Remove intercept
@@ -332,7 +395,6 @@ top_n <- 20
 imp_top <- head(imp_df[order(-imp_df$Importance), ], top_n)
 
 library(ggplot2)
-
 ggplot(imp_top, aes(x = reorder(Feature, Importance), y = Coefficient, 
                     fill = Coefficient > 0)) +
     geom_col(show.legend = FALSE) +
@@ -342,7 +404,6 @@ ggplot(imp_top, aes(x = reorder(Feature, Importance), y = Coefficient,
          y = "Coefficient") +
     scale_fill_manual(values = c("steelblue", "firebrick")) +
     theme_minimal(base_size = 14)
-
 ```
 
 ## Train ElasticNet
@@ -593,7 +654,7 @@ models2train <- c(
     "knn", # KNN
     "rf", # Random forest
     "gbm", # Gradient Boosted Machines
-    "xgbTree",
+    "xgbTree", # XGboost
     "svmRadial" # Support vector machines with radial kernel
     )
 
