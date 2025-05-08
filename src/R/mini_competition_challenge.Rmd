@@ -21,11 +21,14 @@ Participants will develop and submit four machine learning models to predict dru
 
 -   The dataset is publicly available, but we simulate a validation set to ensure fair evaluation.
 
+
 ## What You’ll Receive
 
 -   Four training datasets, one for each drug.
 
 -   Four test datasets without labels.
+
+Link to the train and test datasets https://cloud.cing.ac.cy/index.php/s/d9npoZDR7HebnSf
 
 ## Submissions 
 
