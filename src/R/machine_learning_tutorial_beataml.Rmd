@@ -77,7 +77,7 @@ library(data.table)
 library(magrittr)
 
 # Read file ####
-cpm <- fread(file = "../datasets/beataml/Gene_Counts_CPM.csv", check.names = TRUE)
+cpm <- fread(file = "../../datasets/beataml/real/Gene_Counts_CPM.csv", check.names = TRUE)
 cpm_mat <- as.matrix(cpm[, -c(1, 2)])
 rownames(cpm_mat) <- cpm$Gene
 
@@ -93,12 +93,12 @@ colnames(cpm_preprocess)[1] <- "labid"
 
 ```{r}
 # Read file ####
-drug_response <- fread(file = "../datasets/beataml/Drug_Responses.csv")
+drug_response <- fread(file = "../../datasets/beataml/real/Drug_Responses.csv")
 drug_response$inhibitor <- make.names(drug_response$inhibitor)
 drug_response$lab_id <- make.names(drug_response$lab_id)
 colnames(drug_response)[2] <- "labid"
 
-cat("In total we have", length(unique(drug_response[,inhibitor])), "drugs")
+cat("In total we have", length(unique(drug_response[,inhibitor])), "drugs\n")
 ```
 
 ## Select drug to predict its response and formulate the problem
@@ -139,11 +139,11 @@ X <- as.matrix(data_all[, -c("labid", "auc_binary")])
 y <- data_all[, auc_binary]
 ```
 
-# Unsupervised learning - TODO
+# Unsupervised learning
 
 Before proceeding with supervised model training, we explore the structure of the data using unsupervised learning techniques. These methods help uncover hidden patterns, detect outliers, and assess sample groupings without using the response variable.
 
-## Get 50 most variable genes 
+## Get 50 most variable genes
 
 ```{r}
 # Calculate standard deviation 
@@ -154,7 +154,6 @@ hist(gene_sd, xlab = "Genes standard deviation")
 genes2keep <- names(sort(x = gene_sd, decreasing = TRUE)[1:50])
 X_50 <- X[, which(colnames(X) %in% genes2keep)]
 ```
-
 
 ## Principal Component Analysis (PCA)
 
@@ -632,7 +631,6 @@ We selected a diverse set of models that represent different ML families:
 -   SVM (Radial) (non-linear classifier for complex boundaries)
 
 ```{r}
-
 library(doParallel)
 cl <- makePSOCKcluster(4)
 registerDoParallel(cl)
@@ -897,6 +895,9 @@ exm
 In this tutorial, we explored how to:
 
 -   Prepare transcriptomic and drug response data
+-   Train simple statistical models (glm)
+-   Optimize hyper-parameters using cross validation manually
+-   Calculate the Receiver operating characteristic (ROC) curve manually
 -   Train and evaluate classification models using `caret`
 -   Compare models using cross-validation
 -   Explore AutoML capabilities with `h2o`
