@@ -1,0 +1,912 @@
+---
+title: "Machine Learning (ML) Bioinformatics Workshop – Hands-on application of ML on drug response prediction data using R"
+author: "Nestoras Karathanasis"
+date: "2025-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Tutorial Description
+
+In this 4-hour hands-on tutorial, we will explore the application of machine learning techniques for drug response prediction using R. The session is designed for Master’s and PhD students in bioinformatics who want to deepen their understanding of ML workflows and tools in R. We will use the powerful `caret` package for building, training, evaluating and interpreting classification models. Additionally, we will introduce the `h2o` package for scalable modeling and touch upon integrating interactive visualizations using Shiny.
+
+Participants will work with the [BeatAML](https://www.nature.com/articles/s41586-018-0623-z#Sec38) dataset published in Nature 2018, and available in the supplementary material of the paper. BeatAML is a rich pharmacogenomic resource derived from primary samples of acute myeloid leukemia (AML) patients.
+
+This dataset includes:
+
+-   RNA-seq gene expression profiles (RPKM, CPM)
+
+-   Drug response measurements (e.g. IC50, AUC)
+
+-   Clinical annotations
+
+-   Variants
+
+By the end of the tutorial, participants will:
+
+-   Understand data pre-processing steps for transcriptomics data
+
+-   Train multiple ML models (Elastic Net, KNN, Random Forest, Gradient Boosting Machines, Support Vector Machines) using `caret`
+
+-   Evaluate model performance using cross-validation and test sets and several metrics (Confusion matrices, Accuracy, Area Under the ROC curve, etc)
+
+-   Identify important features
+
+-   Explore deep learning and AutoML using `h2o`
+
+At the end of the tutorial, participants will be given a **mini-competition assignment** to apply what they've learned. The team with the best-performing solution will have the opportunity to present their results during the closing session of the conference.
+
+## Software and data requirements
+
+To fully participate in this hands-on tutorial, please ensure the following software and packages are installed before the session begins:
+
+1.  R and RStudio (latest versions)
+
+2.  Required R Packages You can install all required packages using the command below:
+
+```{r}
+# packages <- c("data.table", "caret", "ggplot2", "pROC", "doParallel", 
+#               "magrittr", "h2o", "e1071", "randomForest", "gbm", "xgboost",
+#               "glmnet", "kernlab")
+# install.packages(packages)
+```
+
+3.  System Requirements
+
+    A machine with at least 8 GB RAM
+
+    Multicore CPU recommended for parallel processing
+
+    Stable internet connection (for downloading packages or data, if needed)
+
+4.  Dataset
+
+    Please download the BeatAML dataset (from the supplementary materials of the [original publication](https://www.nature.com/articles/s41586-018-0623-z#Sec38)).
+
+# Load the data
+
+Data were exported to .csv files before running the steps below.
+
+## Read and organize the CPM RNAseq expression data
+
+```{r}
+library(data.table)
+library(magrittr)
+
+# Read file ####
+cpm <- fread(file = "../../datasets/beataml/real/Gene_Counts_CPM.csv", check.names = TRUE)
+cpm_mat <- as.matrix(cpm[, -c(1, 2)])
+rownames(cpm_mat) <- cpm$Gene
+
+# Transpose ####
+cpm_mat <- t(cpm_mat)
+
+# Convert to data.table
+cpm_preprocess <- data.table(cpm_mat, keep.rownames = TRUE)
+colnames(cpm_preprocess)[1] <- "labid"
+```
+
+## Read and organize the Drug Response data
+
+```{r}
+# Read file ####
+drug_response <- fread(file = "../../datasets/beataml/real/Drug_Responses.csv")
+drug_response$inhibitor <- make.names(drug_response$inhibitor)
+drug_response$lab_id <- make.names(drug_response$lab_id)
+colnames(drug_response)[2] <- "labid"
+
+cat("In total we have", length(unique(drug_response[,inhibitor])), "drugs\n")
+```
+
+## Select drug to predict its response and formulate the problem
+
+In the data there are four drugs that are used in clinical practice Gilteritinib, Lenalidomide, Midostaurin, and Venetoclax. We will use **Venetoclax** as an example. We will convert the problem to a classification. For educational purposes, we use the median AUC value to define drug response classes (Sensitive, Resistant).
+
+```{r}
+# Number of samples per drug
+drug_response[
+    inhibitor %in% c("Venetoclax", "Midostaurin",
+                     "Gilteritinib..ASP.2215.",
+                     "Lenalidomide"
+                     ),inhibitor] %>% 
+    table() %>% sort(decreasing = TRUE)
+
+# Select drug
+drug_j <- "Venetoclax"
+drug_response_j <- drug_response[inhibitor == drug_j, c("labid", "auc")]
+
+# Convert the problem to a classification. For educational purposes, we use the median AUC value to define drug response classes.
+drug_response_j[
+    , auc_binary := ifelse(test = auc <= median(drug_response_j[, auc]), 
+                           yes = "Sensitive", 
+                           no = "Resistant"
+                           )
+    ]
+
+# Merge data
+data_all <- merge.data.table(
+    x = drug_response_j[, c("labid", "auc_binary")], 
+    y = cpm_preprocess, 
+    by = "labid")
+
+head(data_all)[, 1:4]
+
+# Create X and y
+X <- as.matrix(data_all[, -c("labid", "auc_binary")])
+y <- data_all[, auc_binary]
+```
+
+# Unsupervised learning
+
+Before proceeding with supervised model training, we explore the structure of the data using unsupervised learning techniques. These methods help uncover hidden patterns, detect outliers, and assess sample groupings without using the response variable.
+
+## Get 50 most variable genes
+
+```{r}
+# Calculate standard deviation 
+gene_sd <- apply(X = X, MARGIN = 2, FUN = sd)
+hist(gene_sd, xlab = "Genes standard deviation")
+
+# Select genes
+genes2keep <- names(sort(x = gene_sd, decreasing = TRUE)[1:50])
+X_50 <- X[, which(colnames(X) %in% genes2keep)]
+```
+
+## Principal Component Analysis (PCA)
+
+We apply PCA to reduce dimensionality and visualize major sources of variance in the data.
+
+```{r}
+
+# Standardize data
+X_scaled <- scale(X_50)
+
+# Apply PCA
+pca <- prcomp(X_scaled)
+
+# Variance explained
+explained_var <- pca$sdev^2 / sum(pca$sdev^2)
+
+# Scree plot: standard deviation of each PC
+scree_df <- data.frame(PC = 1:length(pca$sdev),
+                       VarExplained = explained_var)
+
+library(ggplot2)
+ggplot(scree_df, aes(x = PC, y = VarExplained)) +
+    geom_line() +
+    geom_point() +
+    labs(title = "Scree Plot",
+         x = "Principal Component",
+         y = "Proportion of variable explained") +
+    theme_minimal()
+
+# Visualize first two principal components
+pca_df <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], Response = y)
+ggplot(pca_df, aes(PC1, PC2, color = Response)) +
+  geom_point() +
+  labs(title = "PCA of gene expression data") +
+  theme_minimal()
+
+```
+
+## Clustering
+
+We apply clustering algorithms (e.g., k-means and hierarchical clustering) to discover natural groupings in the samples.
+
+### Run Kmeans clustering
+
+```{r}
+kClust <- kmeans(scale(X_50), centers=2, nstart = 1000, iter.max = 2000)
+kClusters <- as.character(kClust$cluster)
+```
+
+### Annotate and plot the clusters
+
+```{r}
+annotation_col <- data.frame(Response = y)
+rownames(annotation_col) <- data_all$labid
+rownames(X_50) = rownames(annotation_col)
+
+pca_data <- as.data.frame(pca$x[, 1:2])  # Get the first two principal components
+pca_data$Cluster <- as.factor(kClust$cluster)
+
+True_Response <- y
+#colnames(annotation_true)="Response"
+
+# Plot
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Cluster,shape = True_Response)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "K-means Clustering (k = 2) Visualized by PCA")
+
+```
+
+### Run Hierarchical clustering
+
+```{r}
+
+# Scale and transpose the data so samples are rows again (if they aren't)
+X_scaled <- scale(X_50)  # Genes as columns, samples as rows
+
+# Create annotation for pheatmap
+annotation_col <- data.frame(y)
+colnames(annotation_col)="Response"
+rownames(annotation_col) <- data_all$labid
+rownames(X_50) = rownames(annotation_col)
+library(pheatmap)
+pheatmap(t(X_scaled),                   # transpose so genes are rows, samples are columns
+         annotation_col = annotation_col,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         clustering_distance_cols = "euclidean",
+         clustering_method = "ward.D2",
+         fontsize_row = 6,
+         fontsize_col = 6,
+         fontsize = 8,
+         main = "Hierarchical Clustering")
+
+```
+
+# Supervised learning - Model training
+
+## Create train/test split
+
+We will keep 70% of the data for training and 30% for testing. Train and test data partitions will contain the same class representation distribution as the whole dataset - stratified data splitting.
+
+```{r}
+library(caret)
+
+# Split the data into stratified train/test sets (70/30 split)
+set.seed(42)
+trainIndex <- createDataPartition(y, p = 0.7, list = FALSE)
+X_train <- X[trainIndex, ]
+X_test  <- X[-trainIndex, ]
+y_train <- y[trainIndex] %>% factor()
+y_test  <- y[-trainIndex] %>% factor()
+```
+
+## Feature selection on training set (optionally)
+
+We retain the top 50 most variable genes across samples, assuming they carry the most discriminative signal for drug response.
+
+```{r}
+# Calculate standard deviation 
+gene_sd <- apply(X = X_train, MARGIN = 2, FUN = sd)
+hist(gene_sd, xlab = "Genes standard deviation")
+
+# Select genes
+genes2keep <- names(sort(x = gene_sd, decreasing = TRUE)[1:50])
+
+# Make new train and test
+X_train <- X_train[, which(colnames(X_train) %in% genes2keep)]
+X_test <- X_test[, which(colnames(X_test) %in% genes2keep)]
+```
+
+## Logistic Regression with GLM (no hyperparameter tuning)
+
+### Train model
+
+```{r}
+# Combine predictors and response into a single data frame
+# Scale training data
+X_train_scaled <- scale(X_train)
+
+# Scale test data using training mean and sd
+X_test_scaled <- scale(X_test, 
+                       center = attr(X_train_scaled, "scaled:center"), 
+                       scale = attr(X_train_scaled, "scaled:scale"))
+
+
+# Center and scale training data
+train_df <- as.data.frame(X_train_scaled)
+train_df$Response <- ifelse(y_train == "Sensitive", 1, 0)
+
+# Fit logistic regression model
+glm_model <- glm(Response ~ ., data = train_df, family = binomial)
+
+# Summary of the model
+summary(glm_model)
+```
+
+### Evaluate performance on test set
+
+```{r}
+# Predict probabilities on test set
+test_df <- as.data.frame(X_test_scaled)
+glm_probs <- predict(glm_model, newdata = test_df, type = "response")
+
+# Convert probabilities to class predictions using 0.5 threshold
+glm_preds <- ifelse(
+    glm_probs > 0.5, "Sensitive", "Resistant") %>% factor(
+        levels = levels(y_test))
+
+# Evaluate performance
+confusionMatrix(glm_preds, y_test)
+```
+
+Compute the ROC curve manually
+
+```{r}
+# Ground truth (0 = Resistant, 1 = Sensitive)
+actual <- ifelse(y_test == "Sensitive", 1, 0)
+
+# Predicted probabilities for "Sensitive" class
+probs <- glm_probs
+
+# Define thresholds
+thresholds <- seq(from = 0, to = 1, by = 0.001)
+
+# Initialize TPR and FPR vectors
+tpr <- rep(x = NA, length(thresholds))
+fpr <- tpr
+
+# Loop through thresholds
+i = 1
+for (i in seq_along(thresholds)) {
+    thresh <- thresholds[i]
+    preds <- ifelse(probs >= thresh, 1, 0)
+    
+    TP <- sum(preds == 1 & actual == 1)
+    TN <- sum(preds == 0 & actual == 0)
+    FP <- sum(preds == 1 & actual == 0)
+    FN <- sum(preds == 0 & actual == 1)
+      
+    tpr[i] <- TP / (TP + FN)
+    fpr[i] <- FP / (FP + TN)
+}
+
+# Compute AUC using the trapezoidal rule
+# Ensure FPR and TPR are sorted in increasing FPR order
+ord <- order(fpr)
+fpr_sorted <- fpr[ord]
+tpr_sorted <- tpr[ord]
+auc <- sum(diff(fpr_sorted) * (head(tpr_sorted, -1) + tail(tpr_sorted, -1)) / 2)
+auc
+
+# Plot ROC curve
+plot(x = fpr, y = tpr, type = "b", col = "blue", lwd = 2,
+     xlab = "False Positive Rate (1 - Specificity)",
+     ylab = "True Positive Rate (Sensitivity)",
+     main = paste("ROC Curve (AUC =", round(auc, 3), ")"))
+abline(0, 1, col = "gray", lty = 2)
+```
+
+### Model interpretation
+
+```{r}
+# Get coefficients (excluding intercept)
+coefs <- coef(glm_model)
+coefs <- coefs[-1]  # Remove intercept
+coefs <- sort(coefs, decreasing = TRUE)  # Sort by value
+
+# Create a data.frame with absolute values for plotting
+imp_df <- data.frame(
+  Feature = names(coefs),
+  Coefficient = coefs,
+  Importance = abs(coefs)
+)
+
+# Take top N important features
+top_n <- 20
+imp_top <- head(imp_df[order(-imp_df$Importance), ], top_n)
+
+library(ggplot2)
+ggplot(imp_top, aes(x = reorder(Feature, Importance), y = Coefficient, 
+                    fill = Coefficient > 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() +
+    labs(title = "Top 20 Important Features (Logistic Regression)",
+         x = "Feature",
+         y = "Coefficient") +
+    scale_fill_manual(values = c("steelblue", "firebrick")) +
+    theme_minimal(base_size = 14)
+```
+
+## Train ElasticNet
+
+### Manually
+
+```{r}
+library(glmnet)
+set.seed(42)
+
+# Step 1: Prepare data
+y_vec <- ifelse(y_train == "Sensitive", 1, 0)
+
+# Step 2: Define folds manually to perform 5 fold cross validation
+folds <- sample(x = 1:5, size = nrow(X_train), replace = TRUE)
+
+# Step 3: Define lambda grid manually
+lambda_grid <- 10^seq(2, -4, length = 100) # from 100 to 0.0001
+
+# Step 4: Storage for results
+cv_results <- matrix(NA, nrow = length(lambda_grid), ncol = 5)
+
+# Step 5: Manual 5-fold CV
+for (i in seq_len(length.out = max(folds))) {
+    cat("Processing Fold", i, "\n")
+  
+    # Split into train/val
+    val_idx <- which(folds == i)
+    X_train_fold <- X_train[-val_idx, ]
+    y_train_fold <- y_vec[-val_idx]
+  
+    X_val_fold <- X_train[val_idx, ]
+    y_val_fold <- y_vec[val_idx]
+  
+    # Train glmnet model on training fold (all lambdas at once)
+    fold_model <- glmnet(
+        x = X_train_fold,
+        y = y_train_fold,
+        family = "binomial",
+        alpha = 1, # You can tune alpha separately too
+        lambda = lambda_grid
+    )
+  
+    # Predict on validation fold
+    preds <- predict(fold_model, newx = X_val_fold, type = "response")
+  
+    # preds: matrix of n_val_samples x n_lambda
+    # Now for each lambda, calculate accuracy (ACC)
+    
+    for (j in seq_along(lambda_grid)) {
+        pred_prob <- preds[, j]
+        # Compute simple accuracy or AUC
+        pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+        acc <- mean(pred_class == y_val_fold)
+        cv_results[j, i] <- acc
+    }
+}
+colnames(cv_results) <- paste0("Accuracy_fold", 1:5)
+cv_results <- cbind(Lambda = lambda_grid, cv_results)
+head(cv_results)
+
+# Step 6: Aggregate results across folds
+mean_cv_accuracy <- rowMeans(cv_results[, -1])
+
+# Step 7: Find best lambda
+best_lambda_idx <- which.max(mean_cv_accuracy)
+best_lambda <- lambda_grid[best_lambda_idx]
+cat("Best lambda:", best_lambda, "\n")
+
+# Visualization
+df_lambda_cv <- data.frame(
+  Lambda = lambda_grid,
+  Accuracy = mean_cv_accuracy
+)
+
+ggplot(df_lambda_cv, aes(x = log(Lambda), y = Accuracy)) +
+    geom_line() +
+    geom_point() +
+    geom_vline(xintercept = log(best_lambda), color = "red", linetype = "dashed") +
+    labs(
+        title = "Manual CV: Accuracy vs log(Lambda)",
+        x = "log(Lambda)",
+        y = "CV Accuracy"
+      ) +
+    theme_minimal()
+
+
+# Step 8: Retrain final model on full training set
+final_model_manual <- glmnet(
+    x = X_train,
+    y = y_vec,
+    family = "binomial",
+    alpha = 1,
+    lambda = best_lambda
+)
+
+# Step 9: Evaluate on test set
+X_test_mat <- as.matrix(X_test)
+probs_test <- predict(final_model_manual, newx = X_test_mat, type = "response")
+pred_classes_test <- ifelse(probs_test > 0.5, "Sensitive", "Resistant") %>% as.factor()
+
+confusionMatrix(pred_classes_test, y_test)
+
+# Compute ROC curve and AUC
+library(pROC)
+roc_obj <- roc(y_test, probs_test[,1])
+auc_val <- auc(roc_obj)
+
+# Plot ROC
+plot(roc_obj, col = "#2c3e50", lwd = 2, main = paste("ROC Curve (AUC =", round(auc_val, 3), ")"))
+
+```
+
+### Model Interpretation
+
+```{r}
+# Extract and clean non-zero coefficients
+coef_matrix <- coef(final_model_manual)
+coef_df <- as.data.frame(as.matrix(coef_matrix))
+coef_df$gene <- rownames(coef_df)
+colnames(coef_df)[1] <- "coefficient"
+
+# Remove intercept and zero coefficients
+coef_df <- coef_df[coef_df$coefficient != 0 & coef_df$gene != "(Intercept)", ]
+
+# Order by coefficient magnitude
+coef_df <- coef_df[order(abs(coef_df$coefficient), decreasing = TRUE), ]
+
+# Load ggplot2 for visualization
+library(ggplot2)
+
+# Create the plot
+ggplot(coef_df, 
+       aes(x = reorder(gene, coefficient), 
+           y = coefficient, fill = coefficient > 0)) +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    coord_flip() +
+    labs(title = "Non-Zero Coefficients from Elastic Net Model",
+         x = "Gene",
+         y = "Coefficient") +
+    scale_fill_manual(values = c("firebrick", "steelblue")) +
+    theme_minimal(base_size = 14)
+
+```
+
+### Train the Elastic Net model using `cv.glmnet`
+
+```{r}
+# Train elastic net with 5-fold CV
+set.seed(42)
+cv_fit <- cv.glmnet(x = X_train,
+                    y = y_train,
+                    alpha = 1, # Elastic net: mix between LASSO (1) and Ridge (0)
+                    family = "binomial",
+                    type.measure = "auc", # AUC for classification
+                    nfolds = 5)
+
+# View optimal lambda
+cv_fit$lambda.min
+
+# Plot CV resamples
+plot(cv_fit)
+```
+
+### Evaluate performance on test set
+
+```{r}
+# Predict probabilities on test set
+prob_test <- predict(cv_fit, newx = X_test, s = "lambda.min", type = "response")
+
+# Binary prediction
+pred_test <- ifelse(prob_test > 0.5, 1, 0)
+
+# Confusion matrix
+table(Predicted = pred_test, Actual = ifelse(y_test == "Sensitive", 1, 0))
+
+# ROC/AUC
+library(pROC)
+roc_obj <- roc(y_test, as.numeric(prob_test))
+auc(roc_obj)
+
+# Plot ROC
+plot(roc_obj, main = paste("Elastic Net AUC:", round(auc(roc_obj), 3)))
+```
+
+### Interpret the Model: Extract Non-Zero Coefficients
+
+```{r}
+# Extract non-zero coefficients at optimal lambda
+coef_enet <- coef(cv_fit, s = "lambda.min")
+coef_df <- as.data.frame(as.matrix(coef_enet))
+coef_df$gene <- rownames(coef_df)
+colnames(coef_df)[1] <- "coefficient"
+
+# Keep only non-zero and non-intercept
+coef_df <- coef_df[coef_df$coefficient != 0 & coef_df$gene != "(Intercept)", ]
+
+# Sort by magnitude
+coef_df <- coef_df[order(abs(coef_df$coefficient), decreasing = TRUE), ]
+
+# View top features
+head(coef_df, 10)
+
+ggplot(coef_df, aes(x = reorder(gene, coefficient), y = coefficient, fill = coefficient > 0)) +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    coord_flip() +
+    labs(title = "Non-Zero Coefficients from Elastic Net",
+         x = "Gene",
+         y = "Coefficient") +
+    scale_fill_manual(values = c("firebrick", "steelblue")) +
+    theme_minimal(base_size = 14)
+```
+
+## Train Machine Learning models using caret
+
+We selected a diverse set of models that represent different ML families:
+
+-   Elastic Net (linear model with regularization)
+
+-   KNN (non-parametric, distance-based)
+
+-   Random Forest (ensemble of decision trees)
+
+-   GBM (boosted trees)
+
+-   SVM (Radial) (non-linear classifier for complex boundaries)
+
+```{r}
+library(doParallel)
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+# Define training control and pre-processing
+ctrl <- trainControl(
+    method = "cv",
+    number = 5, # 5-fold cross-validation
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary
+)
+
+# Center and scale
+preproc <- c("center", "scale")
+
+# Train models
+models2train <- c(
+    "glmnet", # Elastic Net (glmnet)
+    "knn", # KNN
+    "rf", # Random forest
+    "gbm", # Gradient Boosted Machines
+    "xgbTree", # XGboost
+    "svmRadial" # Support vector machines with radial kernel
+    )
+
+all_models <- vector(mode = "list", length = length(models2train))
+counter <- 1
+for (modeli in models2train){
+    cat("Training model:", modeli, "\n")
+    modeli <- train(
+        x = X_train,
+        y = y_train,
+        method = modeli,
+        trControl = ctrl,
+        preProcess = preproc,
+        tuneLength = 3, 
+        metric = "ROC"
+    )
+    all_models[[counter]] <- modeli
+    counter <- counter + 1
+}
+names(all_models) <- models2train
+
+stopCluster(cl)
+```
+
+## Plot the Resampling Profile
+
+```{r}
+for (i in seq_len(length(all_models))){
+    trellis.par.set(caretTheme())
+    print(plot(all_models[[i]], main = names(all_models)[i]))
+}
+```
+
+# Model selection
+
+## Model Comparison on the Cross Validation(CV) results
+
+```{r}
+resamps <- resamples(all_models)
+summary(resamps)
+
+theme1 <- trellis.par.get()
+theme1$plot.symbol$col = rgb(.2, .2, .2, .4)
+theme1$plot.symbol$pch = 16
+theme1$plot.line$col = rgb(1, 0, 0, .7)
+theme1$plot.line$lwd <- 2
+trellis.par.set(theme1)
+bwplot(resamps, layout = c(3, 1))
+```
+
+## Evaluate statistical significance of differences
+
+```{r}
+# Evaluate statistical significance of differences
+trellis.par.set(caretTheme())
+dotplot(resamps, metric = "ROC")
+difValues <- diff(resamps)
+difValues
+summary(difValues)
+trellis.par.set(theme1)
+bwplot(difValues, layout = c(3, 1))
+
+```
+
+# Evaluate models on test set
+
+We will use confusion matrices, classification reports and the Area Under the ROC curve to evaluate the performance of our models to the test set.
+
+## Confusion matrices and classification reports
+
+```{r}
+for (i in 1:length(all_models)) {
+    preds <- predict(all_models[[i]], X_test)
+    cat("\n##############################")
+    cat("\nModel:", names(all_models)[i], "\n")
+    print(confusionMatrix(preds, y_test))
+}
+```
+
+## Area Under the ROC curve (AUC)
+
+```{r}
+library(ggplot2)
+library(pROC)
+
+# Calculate ROCs and AUCs on test data
+roc_list <- lapply(names(all_models), function(name) {
+  probs <- predict(all_models[[name]], X_test, type = "prob")[, "Sensitive"]
+  roc_obj <- roc(y_test, probs)
+  auc_val <- auc(roc_obj)
+  return(roc_obj)
+})
+aucs_holdout <- sapply(roc_list, auc)
+
+names(roc_list) <- paste0(models2train, " (AUC = ", round(aucs_holdout, 3), ")")
+ggroc(roc_list) + theme_minimal()
+
+```
+
+# Model interpretation across all models
+
+```{r}
+# Extract variable importances
+library(gbm)
+varimps_list <- lapply(all_models, function(modeli) {
+    vi <- varImp(modeli)$importance
+    vi$Feature <- rownames(vi)
+    return(vi)
+})
+
+# Name each model
+names(varimps_list) <- models2train
+
+# Merge all into a long format
+vi_long <- rbindlist(
+    lapply(names(varimps_list), function(namei) {
+        dt <- as.data.table(varimps_list[[namei]])
+        dt[, Model := namei]
+        return(dt)
+  }),
+  use.names = TRUE, fill = TRUE
+)
+
+# For models that have multiple classes (e.g., "Sensitive", "Resistant"),
+# take the average importance across classes if necessary
+vi_long[, my_overall := ifelse(test = is.na(Overall), 
+                               yes = Resistant, 
+                               no = Overall)
+        ]
+vi_long_melted <- dcast.data.table(data = vi_long, formula = Model ~ Feature, 
+                                   value.var = "my_overall")
+
+vi_long_melted_mat <- as.matrix(vi_long_melted[, -"Model"])
+rownames(vi_long_melted_mat) <- vi_long_melted[, Model]
+
+mean_imp_all_models <- sort(
+    x = apply(
+        X = vi_long_melted_mat, 
+        MARGIN = 2, 
+        FUN = mean
+        ), 
+    decreasing = TRUE)
+
+# Plot
+number_of_genes2plot <- 20
+vi2plot_mat <- vi_long_melted_mat[, 
+    colnames(vi_long_melted_mat) %in% names(mean_imp_all_models)[1:number_of_genes2plot]]
+
+library(pheatmap)
+pheatmap(
+    mat = vi2plot_mat,
+    cluster_rows = TRUE,   # Cluster features
+    cluster_cols = TRUE,   # Cluster models
+    scale = "none", # Do not scale the data (optional: could use "row" or     "column" if needed)
+    fontsize_row = 8,
+    fontsize_col = 10,
+    treeheight_row = 50,
+    treeheight_col = 50,
+    main = "Feature Importance Across Models"
+)
+```
+
+## Variable Importance of the best model
+
+```{r}
+plot(varImp(all_models$rf), top = 20, 
+     main = "Variable importance")
+```
+
+# H2O’s AutoML
+
+H2O AutoML can take time depending on dataset size. For tutorial purposes, we limit the number of models to 5. AutoML (Automated Machine Learning) automates the process of training and tuning multiple models, including ensembles, to find the best-performing one with minimal manual effort.
+
+## Training h2o AutoML
+
+```{r}
+library(h2o)
+h2o.init()
+
+train_h2o <- as.h2o(data.frame(X_train, auc_binary = as.factor(y_train)))
+test_h2o  <- as.h2o(data.frame(X_test, auc_binary = as.factor(y_test)))
+
+aml <- h2o.automl(
+    x = colnames(X_train),
+    y = "auc_binary",
+    training_frame = train_h2o,
+    max_models = 5,
+    seed = 42
+)
+
+lb <- aml@leaderboard
+print(lb)
+```
+
+## Make predictions
+
+```{r}
+# To generate predictions on a test set, you can make predictions
+# directly on the `H2OAutoML` object or on the leader model
+# object directly
+pred <- h2o.predict(aml, test_h2o)  # predict(aml, test) also works
+pred
+```
+
+## Evaluate performance on test data
+
+```{r}
+h2o.performance(model = aml@leader, newdata = test_h2o)
+```
+
+## Models explainability
+
+Explain leader model & compare with all AutoML models
+
+```{r}
+exa <- h2o.explain(aml, test_h2o)
+exa
+
+```
+
+Explain a single H2O model (e.g. leader model from AutoML)
+
+```{r}
+# Get the leaderboard
+lb <- aml@leaderboard
+
+# Get the ID of the second model
+second_model_id <- as.data.frame(lb$model_id)[2, 1]
+
+# Retrieve the model
+model2explain <- h2o.getModel(second_model_id)
+
+# Explain the model
+exm <- h2o.explain(model2explain, test_h2o)
+exm
+
+```
+
+# Conclusion
+
+In this tutorial, we explored how to:
+
+-   Prepare transcriptomic and drug response data
+-   Train simple statistical models (glm)
+-   Optimize hyper-parameters using cross validation manually
+-   Calculate the Receiver operating characteristic (ROC) curve manually
+-   Train and evaluate classification models using `caret`
+-   Compare models using cross-validation
+-   Explore AutoML capabilities with `h2o`
+
+Participants are encouraged to experiment with:
+
+-   More drugs from the BeatAML dataset
+-   Additional pre-processing steps (e.g., PCA)
+-   Integration of mutation/variant data
+
+Happy modeling!!

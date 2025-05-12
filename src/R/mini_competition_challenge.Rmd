@@ -1,0 +1,59 @@
+---
+title: "Machine Learning Mini-Challenge @ Hellenic Bioinformatics - 2025"
+author: "Nestoras Karathanasis"
+date: "2025-05-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Objective
+
+Participants will develop and submit four machine learning models to predict drug response (Sensitive vs Resistant) using transcriptomic profiles from cancer samples. The challenge focuses on four clinically relevant drugs commonly used in the treatment of Acute Myeloid Leukemia (AML), Venetoclax, Midostaurin, Gilteritinib..ASP.2215., Lenalidomide.
+
+## Dataset
+
+-   A real-world transcriptomic dataset will be provided (based on the BeatAML dataset).
+
+-   Each sample includes gene expression values and a binary drug response label.
+
+-   The dataset is publicly available, but we simulate a validation set to ensure fair evaluation.
+
+
+## What You’ll Receive
+
+-   Four training datasets, one for each drug.
+
+-   Four test datasets without labels.
+
+Link to the train and test datasets https://cloud.cing.ac.cy/index.php/s/d9npoZDR7HebnSf
+
+## Submissions 
+
+-   Participants will submit four .csv files with their predictions, one for each drug. The prediction file should include two columns, `predict:` which will include the predicted class(0 or 1), `p0` the probability of the sample to belong to class `0`. The filename should be your `teamname_` and the filename of the file you used to predict.
+
+## Rules
+
+-   You may use any ML framework (e.g., R caret, Python scikit-learn, h2o, etc.)
+
+## Prizes & Recognition
+
+-   Top team will be awarded during the closing session.
+
+-   Winners may present their approach in a 3-minute flash talk.
+
+Happy modelling!
+
+## Start here
+
+#### Create training files
+
+Run `src/R/Script_make_training_files.R`
+
+### Read training data, train models etc
+
+```{r}
+# YOUR CODE 
+```
