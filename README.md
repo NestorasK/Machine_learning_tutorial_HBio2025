@@ -49,8 +49,6 @@ install.packages(packages)
 
     Multicore CPU recommended for parallel processing
 
-    Stable internet connection (for downloading packages or data, if needed)
-
 4.  Dataset
 
     Please download the BeatAML dataset (from the supplementary materials of the [original publication](https://www.nature.com/articles/s41586-018-0623-z#Sec38)).
