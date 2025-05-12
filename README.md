@@ -52,3 +52,5 @@ install.packages(packages)
 4.  Dataset
 
     Please download the BeatAML dataset (from the supplementary materials of the [original publication](https://www.nature.com/articles/s41586-018-0623-z#Sec38)).
+
+    Or you can download the data that we will use in the tutorial from our public link, <https://cloud.cing.ac.cy/index.php/s/d9npoZDR7HebnSf>
