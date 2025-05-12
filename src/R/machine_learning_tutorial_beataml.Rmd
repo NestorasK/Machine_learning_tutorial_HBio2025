@@ -1,8 +1,11 @@
 ---
-title: "Machine Learning (ML) Bioinformatics Workshop – Hands-on application of ML on drug response prediction data using R"
+title: "Machine Learning (ML) Bioinformatics Workshop – Hands-on application of ML
+  on drug response prediction data using R"
 author: "Nestoras Karathanasis"
 date: "2025-04-24"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
