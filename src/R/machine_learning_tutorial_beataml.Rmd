@@ -5,73 +5,16 @@ author: "Nestoras Karathanasis"
 date: "2025-04-24"
 output:
   html_document: default
-  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# Tutorial Description
-
-In this 4-hour hands-on tutorial, we will explore the application of machine learning techniques for drug response prediction using R. The session is designed for Master’s and PhD students in bioinformatics who want to deepen their understanding of ML workflows and tools in R. We will use the powerful `caret` package for building, training, evaluating and interpreting classification models. Additionally, we will introduce the `h2o` package for scalable modeling and touch upon integrating interactive visualizations using Shiny.
-
-Participants will work with the [BeatAML](https://www.nature.com/articles/s41586-018-0623-z#Sec38) dataset published in Nature 2018, and available in the supplementary material of the paper. BeatAML is a rich pharmacogenomic resource derived from primary samples of acute myeloid leukemia (AML) patients.
-
-This dataset includes:
-
--   RNA-seq gene expression profiles (RPKM, CPM)
-
--   Drug response measurements (e.g. IC50, AUC)
-
--   Clinical annotations
-
--   Variants
-
-By the end of the tutorial, participants will:
-
--   Understand data pre-processing steps for transcriptomics data
-
--   Train multiple ML models (Elastic Net, KNN, Random Forest, Gradient Boosting Machines, Support Vector Machines) using `caret`
-
--   Evaluate model performance using cross-validation and test sets and several metrics (Confusion matrices, Accuracy, Area Under the ROC curve, etc)
-
--   Identify important features
-
--   Explore deep learning and AutoML using `h2o`
-
-At the end of the tutorial, participants will be given a **mini-competition assignment** to apply what they've learned. The team with the best-performing solution will have the opportunity to present their results during the closing session of the conference.
-
-## Software and data requirements
-
-To fully participate in this hands-on tutorial, please ensure the following software and packages are installed before the session begins:
-
-1.  R and RStudio (latest versions)
-
-2.  Required R Packages You can install all required packages using the command below:
-
-```{r}
-# packages <- c("data.table", "caret", "ggplot2", "pROC", "doParallel", 
-#               "magrittr", "h2o", "e1071", "randomForest", "gbm", "xgboost",
-#               "glmnet", "kernlab")
-# install.packages(packages)
-```
-
-3.  System Requirements
-
-    A machine with at least 8 GB RAM
-
-    Multicore CPU recommended for parallel processing
-
-    Stable internet connection (for downloading packages or data, if needed)
-
-4.  Dataset
-
-    Please download the BeatAML dataset (from the supplementary materials of the [original publication](https://www.nature.com/articles/s41586-018-0623-z#Sec38)).
-
 # Load the data
+From the Supplementary Tables, export Sheet `Table S9-Gene Counts CPM` to `Gene_Counts_CPM.csv` and sheet `Table S10-Drug Responses` to `Drug_Responses.csv`. Place both .csv files to a folder with the following path `datasets/beataml/real/`.
 
-Data were exported to .csv files before running the steps below.
+You can also download the .csv files directly from our public link, <https://cloud.cing.ac.cy/index.php/s/d9npoZDR7HebnSf>
 
 ## Read and organize the CPM RNAseq expression data
 
@@ -224,7 +167,6 @@ ggplot(pca_data, aes(x = PC1, y = PC2, color = Cluster,shape = True_Response)) +
   geom_point(size = 2) +
   theme_minimal() +
   labs(title = "K-means Clustering (k = 2) Visualized by PCA")
-
 ```
 
 ### Run Hierarchical clustering
@@ -340,14 +282,13 @@ actual <- ifelse(y_test == "Sensitive", 1, 0)
 probs <- glm_probs
 
 # Define thresholds
-thresholds <- seq(from = 0, to = 1, by = 0.001)
+thresholds <- seq(from = 0, to = 1, by = 0.01)
 
 # Initialize TPR and FPR vectors
 tpr <- rep(x = NA, length(thresholds))
 fpr <- tpr
 
 # Loop through thresholds
-i = 1
 for (i in seq_along(thresholds)) {
     thresh <- thresholds[i]
     preds <- ifelse(probs >= thresh, 1, 0)
@@ -370,7 +311,7 @@ auc <- sum(diff(fpr_sorted) * (head(tpr_sorted, -1) + tail(tpr_sorted, -1)) / 2)
 auc
 
 # Plot ROC curve
-plot(x = fpr, y = tpr, type = "b", col = "blue", lwd = 2,
+plot(x = fpr, y = tpr, type = "l", col = "blue", lwd = 2,
      xlab = "False Positive Rate (1 - Specificity)",
      ylab = "True Positive Rate (Sensitivity)",
      main = paste("ROC Curve (AUC =", round(auc, 3), ")"))
@@ -516,7 +457,6 @@ auc_val <- auc(roc_obj)
 
 # Plot ROC
 plot(roc_obj, col = "#2c3e50", lwd = 2, main = paste("ROC Curve (AUC =", round(auc_val, 3), ")"))
-
 ```
 
 ### Model Interpretation
@@ -576,11 +516,14 @@ plot(cv_fit)
 # Predict probabilities on test set
 prob_test <- predict(cv_fit, newx = X_test, s = "lambda.min", type = "response")
 
+
 # Binary prediction
-pred_test <- ifelse(prob_test > 0.5, 1, 0)
+pred_test <- predict(cv_fit, newx = X_test, s = "lambda.min", type = "class")
+# or 
+# pred_test <- ifelse(prob_test > 0.5, 1, 0)
 
 # Confusion matrix
-table(Predicted = pred_test, Actual = ifelse(y_test == "Sensitive", 1, 0))
+table(Predicted = pred_test, Actual = y_test)
 
 # ROC/AUC
 library(pROC)
