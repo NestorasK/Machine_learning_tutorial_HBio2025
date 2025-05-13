@@ -11,7 +11,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Objective
 
-Participants will develop and submit four machine learning models to predict drug response (Sensitive vs Resistant) using transcriptomic profiles from cancer samples. The challenge focuses on four clinically relevant drugs commonly used in the treatment of Acute Myeloid Leukemia (AML), Venetoclax, Midostaurin, Gilteritinib..ASP.2215., Lenalidomide.
+Participants will develop and submit four machine learning models to predict drug response (Sensitive vs Resistant) using transcriptomic profiles from cancer samples. The challenge focuses on four clinically relevant drugs, commonly used in the treatment of Acute Myeloid Leukemia (AML), Venetoclax, Midostaurin, Gilteritinib and Lenalidomide.
 
 ## Dataset
 
@@ -28,11 +28,11 @@ Participants will develop and submit four machine learning models to predict dru
 
 -   Four test datasets without labels.
 
-Link to the train and test datasets https://cloud.cing.ac.cy/index.php/s/d9npoZDR7HebnSf
+Link to the train and test datasets <https://cloud.cing.ac.cy/index.php/s/d9npoZDR7HebnSf>
 
 ## Submissions 
 
--   Participants will submit four .csv files with their predictions, one for each drug. The prediction file should include two columns, `predict:` which will include the predicted class(0 or 1), `p0` the probability of the sample to belong to class `0`. The filename should be your `teamname_` and the filename of the file you used to predict.
+-   Participants will submit four .csv files with their predictions, one for each drug. The prediction file should include two columns, `predict` which will include the predicted class(0 or 1), `p0` the probability of the sample to belong to class `0`. The filename should be your `teamname_` and the filename of the file you used to predict.
 
 ## Rules
 
